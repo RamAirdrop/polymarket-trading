@@ -531,8 +531,14 @@ def analyse(events, R, bankroll=1000, surface=None, allow_live=True, min_games=5
         if "/" in outs[0] or "/" in outs[1]:
             row["signal"] = "doubles - skipped"
         elif a and b and a != b and min(R.n[a], R.n[b]) >= min_games:
+            # 1. Pre-match foundational model prediction (surface, skill, Elo)
             p0, fa, fb = R.predict(a, b, surf, best_of=guess_best_of(ev))
             pm = [p0, 1 - p0]; form = [fa, fb]
+            
+            # Lock the model's preferred side based purely on pre-match skill/surface analysis
+            i = 0 if pm[0] >= pm[1] else 1
+            pb = pm[i]
+
             if live:
                 if not stt and ev.get("score"):
                     stt = {"score": ev["score"], "a_is_home": True, "oriented": False, "ended": bool(ev.get("ended"))}
@@ -551,8 +557,6 @@ def analyse(events, R, bankroll=1000, surface=None, allow_live=True, min_games=5
                 else:
                     row["live_check"] = "using pre-match rating (no live score feed)"
 
-            i = 0 if pm[0] >= pm[1] else 1
-            pb = pm[i]
             price = asks[i]
             edge = pb - price
             evv = pb / price - 1
@@ -562,7 +566,7 @@ def analyse(events, R, bankroll=1000, surface=None, allow_live=True, min_games=5
             row["role"] = "underdog" if price < 0.5 else "favourite"
             row.update(side=i, pick=outs[i], price=price, model_p=pb, edge=edge, ev=evv, payout_x=1 / price,
                        form=f"{form[0]:.0%} / {form[1]:.0%}", stake=round(bankroll * 0.05, 2),
-                       signal=f"BUY {outs[i]} ({pb:.0%})")
+                       signal=f"BUY {outs[i]} ({pb:.0%})" if edge > 0 else "PASS (no edge)")
         else:
             row["signal"] = "thin data - skipped" if (a and b and a != b) else "no data"
         rows.append(row)
