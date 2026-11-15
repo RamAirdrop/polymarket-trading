@@ -278,13 +278,13 @@ class Ratings:
         return (sf[0] + K * spw0) / (sf[1] + K), (sf[2] + K * rpw0) / (sf[3] + K), mu
 
     def _eff(self, p, surf, w_surf, form_pts):
-        ws = w_surf * min(1.0, self.ns.get((p, surf), 0) / 20)
+        ws = w_surf * min(1.0, self.ns.get((p, surf), 0) / 15)
         base = (1 - ws) * self.o[p] + ws * self.s.get((p, surf), self.o[p])
         f = self.form[p]
         fm = sum(f) / len(f) if len(f) >= 3 else 0.5
         return base + form_pts * (fm - 0.5) * 2, fm
 
-    def predict_parts(self, a, b, surf, w_surf=0.5, form_pts=40, best_of=3):
+    def predict_parts(self, a, b, surf, w_surf=0.65, form_pts=55, best_of=3):
         ra, fa = self._eff(a, surf, w_surf, form_pts)
         rb, fb = self._eff(b, surf, w_surf, form_pts)
         pe = self._p(ra, rb)
@@ -297,7 +297,7 @@ class Ratings:
             pp = p_match_from_points(sa, sb, best_of)
         return pe, pp, fa, fb
 
-    def predict(self, a, b, surf, w_surf=0.5, form_pts=40, w_point=0.4, best_of=3):
+    def predict(self, a, b, surf, w_surf=0.65, form_pts=55, w_point=0.35, best_of=3):
         pe, pp, fa, fb = self.predict_parts(a, b, surf, w_surf, form_pts, best_of)
         return (pe if pp is None else (1 - w_point) * pe + w_point * pp), fa, fb
 
@@ -435,7 +435,7 @@ def fetch_events(max_events=400, closed=False, stop_before=None):
 
 
 BAD = ("over", "under", "yes", "no")
-NOT_ML = re.compile(r"\b(sets?|handicap|spread|o/u|total|games?)\b|\([+-]\d", re.I)
+NOT_ML = re.compile(r"(sets?|handicap|spread|o/u|total|games?)|\([+-]\d", re.I)
 
 
 def pick_moneyline(ev):
@@ -454,7 +454,7 @@ def pick_moneyline(ev):
 
 def _is_match(ev):
     m = pick_moneyline(ev)
-    return bool(m) and bool(re.search(r"\bvs\.?\b", f"{ev.get('title', '')} {m.get('question', '')}", re.I))
+    return bool(m) and bool(re.search(r"vs\.?", f"{ev.get('title', '')} {m.get('question', '')}", re.I))
 
 
 SURF_KEYS = {
@@ -481,22 +481,43 @@ def detect_surface(ev, override=None):
     return "Hard"
 
 
-def analyse(events, R, bankroll=1000, surface=None, allow_live=True, min_games=5, live_scores=None):
+def analyse(events, R, bankroll=1000, surface=None, allow_live=True, min_games=5, live_scores=None, target_date=None):
     now = pd.Timestamp.now(tz="UTC")
     rows = []
     for ev in events:
         m = pick_moneyline(ev)
         if not m:
             continue
+        if m.get("closed") or ev.get("closed") or ev.get("ended"):
+            continue
+
+        start = pd.to_datetime(m.get("gameStartTime") or ev.get("startTime"), utc=True, errors="coerce")
+        end_time = pd.to_datetime(m.get("endDate") or ev.get("endDate"), utc=True, errors="coerce")
+
+        # Filter out finished / stale matches
+        if pd.notna(end_time) and end_time < now:
+            continue
+        if pd.notna(start) and start < now - pd.Timedelta(hours=5) and not ev.get("live"):
+            continue
+
+        # Daily / Target date filter (in local timezone)
+        if target_date is not None:
+            if pd.isna(start) or start.astimezone().date() != target_date:
+                continue
+
         outs = _j(m.get("outcomes")); px = [float(x) for x in _j(m.get("outcomePrices")) or [0, 0]]
         if len(px) != 2 or min(px) <= 0.01 or max(px) >= 0.99:
             continue
+
+        stt = live_scores.lookup(ev.get("slug"), outs) if live_scores else None
+        if stt and stt.get("ended"):
+            continue
+
         bid, ask = m.get("bestBid"), m.get("bestAsk")
         ask0 = float(ask) if ask else px[0]
         ask1 = 1 - float(bid) if bid else px[1]
         asks = [min(ask0, 0.99), min(ask1, 0.99)]
-        start = pd.to_datetime(m.get("gameStartTime") or ev.get("startTime"), utc=True, errors="coerce")
-        live = bool(ev.get("live")) or (pd.notna(start) and start < now)
+        live = bool(ev.get("live")) or (pd.notna(start) and start <= now)
         surf = detect_surface(ev, surface)
         a, b = R.find(outs[0]), R.find(outs[1])
         chg = float(m.get("oneDayPriceChange") or 0)
@@ -515,7 +536,6 @@ def analyse(events, R, bankroll=1000, surface=None, allow_live=True, min_games=5
             p0, fa, fb = R.predict(a, b, surf, best_of=guess_best_of(ev))
             pm = [p0, 1 - p0]; form = [fa, fb]
             if live:
-                stt = live_scores.lookup(ev.get("slug"), outs) if live_scores else None
                 if not stt and ev.get("score"):
                     stt = {"score": ev["score"], "a_is_home": True, "oriented": False, "ended": bool(ev.get("ended"))}
                 ps = parse_score(stt["score"]) if stt else None
@@ -563,7 +583,6 @@ def log_signals(df, path=os.path.join(DATA_DIR, "signals_log.csv")):
 
 
 def health_check():
-    from collections import Counter
     print("== 1. Match history (Sackmann) ==")
     df = load_matches()
     for t, g in df.groupby("tour"):
@@ -602,7 +621,8 @@ def main():
         cols = ["match", "surface", "live", "vol_24h", "p1", "pick", "price", "model_p", "edge", "signal"]
         print(df[cols].head(40).to_string(index=False, float_format=lambda x: f"{x:,.3f}"))
         log_signals(df)
-        print(f"\n{(df.signal.str.startswith('BUY')).sum()} BUY signals logged to data/signals_log.csv")
+        print(f"
+{(df.signal.str.startswith('BUY')).sum()} BUY signals logged to data/signals_log.csv")
 
 
 if __name__ == "__main__":

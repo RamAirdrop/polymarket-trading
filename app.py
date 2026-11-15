@@ -27,7 +27,7 @@ def ratings():
     return tc.build_ratings()
 
 
-@st.cache_data(ttl=45, show_spinner="Fetching Polymarket…")
+@st.cache_data(ttl=30, show_spinner="Fetching Polymarket…")
 def events():
     return tc.fetch_events()
 
@@ -89,26 +89,42 @@ if pend:
 
 tab1, tab2, tab3 = st.tabs(["📡 Markets", "📒 Positions & daily P&L", "🧪 Backtest"])
 
-# ------------------------------------------------------------------ tab 1: markets with buy buttons
+# ------------------------------------------------------------------ tab 1: markets with buy buttons & auto-refresh
 with tab1:
-    top = st.columns([1, 3, 4])
+    top = st.columns([1, 2, 2, 2, 3])
     if top[0].button("🔄 Refresh"):
         events.clear()
-    surface = top[1].selectbox("Surface", ["Auto", "Hard", "Clay", "Grass"], label_visibility="collapsed")
-    top[2].caption(f"Live feed: {'🟢 connected' if LS.connected else '🔴 offline'} ({LS.frames} updates)")
+        st.rerun()
 
-    df = tc.analyse(events(), ratings(), 1000, surface=None if surface == "Auto" else surface, live_scores=LS)
-    if df.empty:
-        st.warning("No tennis match markets found right now.")
+    date_mode = top[1].selectbox("Date Filter", ["Today", "All Dates", "Pick Date"], label_visibility="collapsed")
+    if date_mode == "Today":
+        selected_date = pd.Timestamp.now().astimezone().date()
+    elif date_mode == "Pick Date":
+        selected_date = top[2].date_input("Select Date", value=pd.Timestamp.now().astimezone().date(), label_visibility="collapsed")
     else:
+        selected_date = None
+
+    surface = top[3].selectbox("Surface", ["Auto", "Hard", "Clay", "Grass"], label_visibility="collapsed")
+    top[4].caption(f"Live feed: {'🟢 connected' if LS.connected else '🔴 offline'} ({LS.frames} updates) · Auto-refresh 20s")
+
+    @st.fragment(run_every=20)
+    def render_live_markets():
+        # Force fresh fetch if cache expired
+        df = tc.analyse(events(), ratings(), 1000, surface=None if surface == "Auto" else surface, live_scores=LS, target_date=selected_date)
+        if df.empty:
+            st.warning("No tennis match markets found for the selected filter or date.")
+            return
+
         tdf0 = paper.trades_df(mark=False)
         held = {(r.market_id, r.mode) for r in tdf0[tdf0.status == "open"].itertuples()} if not tdf0.empty else set()
+
         f1, f2, f3, f4 = st.columns([3, 3, 2, 1])
-        show = f1.radio("Show", ["All", "BUY signals", "Live now", "Pre-match"], horizontal=True)
-        q = f3.text_input("Search player").strip().lower()
-        nrows = f4.number_input("Rows", 5, 100, 25)
+        show = f1.radio("Show", ["All", "BUY signals", "Live now", "Pre-match"], horizontal=True, key="show_radio")
+        q = f3.text_input("Search player", key="search_q").strip().lower()
+        nrows = f4.number_input("Rows", 5, 100, 25, key="nrows_input")
         buys = df[df.signal.str.startswith("BUY")]
         f2.write(f"**{len(df)}** matches · **{len(buys)}** BUY signals · 24h volume **${df.vol_24h.sum():,.0f}**")
+
         view = df
         if show == "BUY signals": view = buys
         elif show == "Live now": view = df[df.live]
@@ -132,7 +148,8 @@ with tab1:
                     do_real = b2.button(f"💵 Buy {lab}", key=f"r_{mid}", disabled=amt is None)
                 with cA:
                     st.markdown(f"**{r['match']}**")
-                    st.caption(("🔴 LIVE" if r["live"] else "⏳ pre-match") + f" · {r['surface']} · vol ${r['vol_24h']:,.0f}"
+                    start_str = r["start"].astimezone().strftime("%b %d, %I:%M %p") if pd.notna(r["start"]) else "TBD"
+                    st.caption(("🔴 LIVE" if r["live"] else f"⏳ {start_str}") + f" · {r['surface']} · vol ${r['vol_24h']:,.0f}"
                                f" · liq ${r['liquidity']:,.0f}")
                     if r["score"]:
                         st.caption("📟 " + r["score"])
@@ -164,6 +181,8 @@ with tab1:
                                                             model_p=p_model, edge=edge)
                     st.rerun()
 
+    render_live_markets()
+
 # ------------------------------------------------------------------ tab 2: positions & daily P&L
 with tab2:
     h1, h2 = st.columns([1, 5])
@@ -174,8 +193,16 @@ with tab2:
         st.info("No trades yet. Use 📄 Paper buy (fake money) or 💵 Buy (real) on the Markets tab.")
     else:
         rep = paper.daily_report(tdf)
-        st.subheader("Today")
+        d_hdr1, d_hdr2 = st.columns([3, 1])
+        d_hdr1.subheader("Today")
         td = rep[rep.day == paper.today()]
+
+        if not td[td.mode == "paper"].empty:
+            if d_hdr2.button("🗑️ Clear Today's Paper Trades"):
+                paper.clear_daily_trades(paper.today(), mode="paper")
+                st.success(f"Cleared paper trades for {paper.today()}")
+                st.rerun()
+
         if td.empty:
             st.write("No bets placed today.")
         for r in td.itertuples():
@@ -212,10 +239,19 @@ with tab2:
         if len(done) > 1:
             st.line_chart(pd.DataFrame({"cumulative settled P&L ($)": done.pnl.cumsum().values}))
         st.caption("Real positions are tracked here as an estimate; actual proceeds are redeemed on Polymarket.")
-    with st.expander("Paper account"):
+
+    with st.expander("Paper account & Clear Options"):
         _, S = paper.portfolio(mark=False)
         st.write(f"Paper cash ${S['cash']:,.2f} of ${S['start_cash']:,.0f} · equity ${S['equity']:,.2f}")
-        if st.button("⚠️ Reset paper account (deletes ALL trades, paper and real records)"):
+        cl1, cl2, cl3 = st.columns(3)
+        avail_days = sorted(tdf[tdf["mode"] == "paper"].day.unique().tolist(), reverse=True) if not tdf.empty else []
+        if avail_days:
+            del_day = cl1.selectbox("Select day to clear paper trades", avail_days, label_visibility="collapsed")
+            if cl2.button(f"🗑️ Clear {del_day} paper trades"):
+                paper.clear_daily_trades(del_day, mode="paper")
+                st.success(f"Cleared paper trades for {del_day}")
+                st.rerun()
+        if cl3.button("⚠️ Reset entire paper account"):
             paper.reset(5000); st.rerun()
 
 # ------------------------------------------------------------------ tab 3: backtest

@@ -54,6 +54,21 @@ def reset(cash=5000.0):
     c.commit()
 
 
+def clear_daily_trades(day_str, mode="paper"):
+    """Delete all trades for a specific local calendar day and mode ('paper' or 'real')."""
+    df = trades_df(mark=False)
+    if df.empty:
+        return 0
+    target_ids = df[(df.day == day_str) & (df["mode"] == mode)].id.tolist()
+    if not target_ids:
+        return 0
+    c = con()
+    placeholders = ",".join(["?"] * len(target_ids))
+    c.execute(f"DELETE FROM trades WHERE id IN ({placeholders})", target_ids)
+    c.commit()
+    return len(target_ids)
+
+
 # ------------------------------------------------------------ today's fixed stake
 def get_stake():
     c = con()
