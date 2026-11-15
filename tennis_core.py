@@ -435,7 +435,7 @@ def fetch_events(max_events=400, closed=False, stop_before=None):
 
 
 BAD = ("over", "under", "yes", "no")
-NOT_ML = re.compile(r"(sets?|handicap|spread|o/u|total|games?)|\([+-]\d", re.I)
+NOT_ML = re.compile(r"\b(sets?|handicap|spread|o/u|total|games?)\b|\([+-]\d", re.I)
 
 
 def pick_moneyline(ev):
@@ -454,12 +454,12 @@ def pick_moneyline(ev):
 
 def _is_match(ev):
     m = pick_moneyline(ev)
-    return bool(m) and bool(re.search(r"vs\.?", f"{ev.get('title', '')} {m.get('question', '')}", re.I))
+    return bool(m) and bool(re.search(r"\bvs\.?\b", f"{ev.get('title', '')} {m.get('question', '')}", re.I))
 
 
 SURF_KEYS = {
     "Clay": ["roland garros", "french open", "monte carlo", "monte-carlo", "madrid", "rome", "italian open",
-             "barcelona", "hamburg", "clay", "estoril", "bucharest", "geneva", "lyon", "umag", "gstaad", "bastad", "kitzbuhel"],
+             "barcelona", "hamburg", "clay", "estoril", "bucharest", "genevar", "lyon", "umag", "gstaad", "bastad", "kitzbuhel"],
     "Grass": ["wimbledon", "halle", "queen", "grass", "eastbourne", "mallorca", "s-hertogenbosch", "newport", "stuttgart"],
 }
 
@@ -494,15 +494,13 @@ def analyse(events, R, bankroll=1000, surface=None, allow_live=True, min_games=5
         start = pd.to_datetime(m.get("gameStartTime") or ev.get("startTime"), utc=True, errors="coerce")
         end_time = pd.to_datetime(m.get("endDate") or ev.get("endDate"), utc=True, errors="coerce")
 
-        # Filter out finished / stale matches
         if pd.notna(end_time) and end_time < now:
             continue
         if pd.notna(start) and start < now - pd.Timedelta(hours=5) and not ev.get("live"):
             continue
 
-        # Daily / Target date filter (in local timezone)
         if target_date is not None:
-            if pd.isna(start) or start.astimezone().date() != target_date:
+            if pd.isna(start) or start.tz_convert("UTC").date() != target_date:
                 continue
 
         outs = _j(m.get("outcomes")); px = [float(x) for x in _j(m.get("outcomePrices")) or [0, 0]]
@@ -553,7 +551,6 @@ def analyse(events, R, bankroll=1000, surface=None, allow_live=True, min_games=5
                 else:
                     row["live_check"] = "using pre-match rating (no live score feed)"
 
-            # Pick whichever player the model favors (> 50% win probability)
             i = 0 if pm[0] >= pm[1] else 1
             pb = pm[i]
             price = asks[i]
@@ -621,8 +618,7 @@ def main():
         cols = ["match", "surface", "live", "vol_24h", "p1", "pick", "price", "model_p", "edge", "signal"]
         print(df[cols].head(40).to_string(index=False, float_format=lambda x: f"{x:,.3f}"))
         log_signals(df)
-        print(f"
-{(df.signal.str.startswith('BUY')).sum()} BUY signals logged to data/signals_log.csv")
+        print(f"\n{(df.signal.str.startswith('BUY')).sum()} BUY signals logged to data/signals_log.csv")
 
 
 if __name__ == "__main__":

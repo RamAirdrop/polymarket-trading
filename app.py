@@ -28,7 +28,7 @@ def ratings():
     return tc.build_ratings()
 
 
-@st.cache_data(ttl=30, show_spinner="Fetching Polymarket…")
+@st.cache_data(ttl=20, show_spinner="Fetching Polymarket…")
 def events():
     return tc.fetch_events()
 
@@ -39,6 +39,20 @@ def scores():
 
 
 LS = scores()
+
+
+def get_live_ask(token_id, fallback_ask):
+    """Fetch the latest best ask directly from the Polymarket CLOB order book."""
+    if not token_id:
+        return fallback_ask
+    try:
+        _, asks = tc.get_book(token_id)
+        if asks:
+            return float(asks[0][0])
+    except Exception:
+        pass
+    return fallback_ask
+
 
 # ------------------------------------------------------------------ today's fixed stake
 amt, locked = paper.get_stake()
@@ -90,27 +104,33 @@ if pend:
 
 tab1, tab2, tab3 = st.tabs(["📡 Markets", "📒 Positions & daily P&L", "🧪 Backtest"])
 
-# ------------------------------------------------------------------ tab 1: markets with buy buttons & auto-refresh
+# ------------------------------------------------------------------ tab 1: markets with buy buttons & toggleable refresh
 with tab1:
-    top = st.columns([1, 2, 2, 2, 3])
+    top = st.columns([1.2, 1.8, 1.8, 1.8, 1.6, 2.8])
     if top[0].button("🔄 Refresh"):
         events.clear()
         st.rerun()
 
+    auto_refresh = top[1].toggle("Auto-refresh (20s)", value=False)
+    run_interval = 20 if auto_refresh else None
+
     today_local = datetime.now().astimezone().date()
-    date_mode = top[1].selectbox("Date Filter", ["Today", "All Dates", "Pick Date"], label_visibility="collapsed")
+    date_mode = top[2].selectbox("Date Filter", ["Today", "All Dates", "Pick Date"], label_visibility="collapsed")
     if date_mode == "Today":
         selected_date = today_local
     elif date_mode == "Pick Date":
-        selected_date = top[2].date_input("Select Date", value=today_local, label_visibility="collapsed")
+        selected_date = top[3].date_input("Select Date", value=today_local, label_visibility="collapsed")
     else:
         selected_date = None
 
-    surface = top[3].selectbox("Surface", ["Auto", "Hard", "Clay", "Grass"], label_visibility="collapsed")
-    top[4].caption(f"Live feed: {'🟢 connected' if LS.connected else '🔴 offline'} ({LS.frames} updates) · Auto-refresh 20s")
+    surface = top[4].selectbox("Surface", ["Auto", "Hard", "Clay", "Grass"], label_visibility="collapsed")
+    status_txt = "Auto-refresh ON (20s)" if auto_refresh else "Manual refresh only"
+    top[5].caption(f"Live feed: {'🟢 connected' if LS.connected else '🔴 offline'} ({LS.frames} updates) · {status_txt}")
 
-    @st.fragment(run_every=20)
+    @st.fragment(run_every=run_interval)
     def render_live_markets():
+        if auto_refresh:
+            events.clear()
         df = tc.analyse(events(), ratings(), 1000, surface=None if surface == "Auto" else surface, live_scores=LS, target_date=selected_date)
         if df.empty:
             st.warning("No tennis match markets found for the selected filter or date.")
@@ -135,12 +155,16 @@ with tab1:
 
         for r in view.head(int(nrows)).to_dict("records"):
             mid = str(r["market_id"]); outs = list(r["outs"]); asks = list(r["asks"])
+            tokens = list(r["tokens"]) if r["tokens"] else []
             with st.container(border=True):
                 cA, cB, cC = st.columns([3, 3, 3])
                 with cC:
                     side = st.selectbox("Player", outs, index=int(r["side"]) if pd.notna(r["side"]) else 0,
                                         key=f"side_{mid}", label_visibility="collapsed")
-                    i = outs.index(side); ask = asks[i]
+                    i = outs.index(side)
+                    tok = tokens[i] if i < len(tokens) else None
+                    ask = get_live_ask(tok, asks[i])
+                    asks[i] = ask
                     p_model = r["blend"][i] if isinstance(r["blend"], (list, tuple)) else None
                     edge = None if p_model is None else p_model - ask
                     b1, b2 = st.columns(2)
@@ -148,8 +172,8 @@ with tab1:
                     do_paper = b1.button(f"📄 Paper buy {lab}", key=f"p_{mid}", disabled=amt is None)
                     do_real = b2.button(f"💵 Buy {lab}", key=f"r_{mid}", disabled=amt is None)
                 with cA:
-                    st.markdown(f"**{r['match']}**")
-                    start_str = r["start"].astimezone().strftime("%b %d, %I:%M %p") if pd.notna(r["start"]) else "TBD"
+                    st.markdown(f"**{r['match']}** · [Polymarket ↗]({r['url']})")
+                    start_str = r["start"].tz_convert("UTC").strftime("%b %d, %I:%M %p") if pd.notna(r["start"]) else "TBD"
                     st.caption(("🔴 LIVE" if r["live"] else f"⏳ {start_str}") + f" · {r['surface']} · vol ${r['vol_24h']:,.0f}"
                                f" · liq ${r['liquidity']:,.0f}")
                     if r["score"]:
@@ -171,13 +195,13 @@ with tab1:
 
                 if do_paper:
                     try:
-                        res = paper.open_trade(r["market_id"], r["tokens"][i], r["match"], side, r["surface"], r["url"], amt,
+                        res = paper.open_trade(r["market_id"], tok, r["match"], side, r["surface"], r["url"], amt,
                                                model_p=p_model, edge=edge, fallback_ask=ask, mode="paper")
                         st.toast(f"Paper bought {res['shares']:.1f} {side} shares @ {res['avg_price']:.3f} (${res['cost']:.2f})")
                     except ValueError as e:
                         st.error(str(e))
                 if do_real:
-                    st.session_state["pending_real"] = dict(market_id=r["market_id"], token=r["tokens"][i], match=r["match"],
+                    st.session_state["pending_real"] = dict(market_id=r["market_id"], token=tok, match=r["match"],
                                                             pick=side, surface=r["surface"], url=r["url"], usd=amt, ask=ask,
                                                             model_p=p_model, edge=edge)
                     st.rerun()
@@ -196,9 +220,9 @@ with tab2:
         rep = paper.daily_report(tdf)
         d_hdr1, d_hdr2 = st.columns([3, 1])
         d_hdr1.subheader("Today")
-        td = rep[rep.day == paper.today()]
+        td = rep[rep.day == paper.today()] if not rep.empty and "day" in rep.columns else pd.DataFrame()
 
-        if not td[td.mode == "paper"].empty:
+        if not td.empty and "mode" in td.columns and not td[td["mode"] == "paper"].empty:
             if d_hdr2.button("🗑️ Clear Today's Paper Trades"):
                 paper.clear_daily_trades(paper.today(), mode="paper")
                 st.success(f"Cleared paper trades for {paper.today()}")
