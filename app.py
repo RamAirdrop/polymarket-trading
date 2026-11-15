@@ -1,5 +1,6 @@
 """Streamlit dashboard:  python -m streamlit run app.py"""
 import os
+from datetime import datetime
 import pandas as pd
 import streamlit as st
 
@@ -96,11 +97,12 @@ with tab1:
         events.clear()
         st.rerun()
 
+    today_local = datetime.now().astimezone().date()
     date_mode = top[1].selectbox("Date Filter", ["Today", "All Dates", "Pick Date"], label_visibility="collapsed")
     if date_mode == "Today":
-        selected_date = pd.Timestamp.now().astimezone().date()
+        selected_date = today_local
     elif date_mode == "Pick Date":
-        selected_date = top[2].date_input("Select Date", value=pd.Timestamp.now().astimezone().date(), label_visibility="collapsed")
+        selected_date = top[2].date_input("Select Date", value=today_local, label_visibility="collapsed")
     else:
         selected_date = None
 
@@ -109,7 +111,6 @@ with tab1:
 
     @st.fragment(run_every=20)
     def render_live_markets():
-        # Force fresh fetch if cache expired
         df = tc.analyse(events(), ratings(), 1000, surface=None if surface == "Auto" else surface, live_scores=LS, target_date=selected_date)
         if df.empty:
             st.warning("No tennis match markets found for the selected filter or date.")
